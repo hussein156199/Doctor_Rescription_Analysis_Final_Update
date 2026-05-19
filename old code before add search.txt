@@ -1,0 +1,1941 @@
+# old drug code
+# src/drugs.py
+import difflib
+import pandas as pd
+import re
+import sqlite3
+import hashlib
+from pathlib import Path
+from functools import lru_cache
+
+# تحديد المسار الصحيح
+BASE_DIR = Path(__file__).resolve().parent.parent
+CSV_PATH = BASE_DIR / "data" / "medicines.csv"
+li = '''
+A.E.R.
+A.S.
+A+D
+a05
+Zonticin Eye/Ear Drop
+Zenoxa OD 900 Tablet SR
+Zitelmi-H Tablet
+Zylin D 50/20 Capsule DR
+'''
+
+names = [name.strip() for name in li.split('\n') if name.strip()]
+
+# قاعدة بيانات الأدوية
+medicine_details = {}
+
+# ذاكرة تخزين مؤقت للبحث
+search_cache = {}
+
+def load_medicine_database():
+    """تحميل قاعدة بيانات الأدوية من CSV"""
+    global medicine_details
+
+    print(f"🔍 البحث عن CSV في: {CSV_PATH}")
+
+    if CSV_PATH.exists():
+        try:
+            df = pd.read_csv(CSV_PATH)
+            df.fillna("", inplace=True)
+
+            count = 0
+            for _, row in df.iterrows():
+                name = str(row.get("Name", "")).strip()
+                if name and name.lower() != 'nan' and name != '':
+                    medicine_details[name.lower()] = {
+                        "Name": row.get("Name", ""),
+                        "Contains": row.get("Contains", ""),
+                        "ProductIntroduction": row.get("ProductIntroduction", ""),
+                        "ProductBenefits": row.get("ProductBenefits", ""),
+                        "SideEffect": row.get("SideEffect", ""),
+                        "HowToUse": row.get("HowToUse", ""),
+                        "HowWorks": row.get("HowWorks", ""),
+                        "QuickTips": row.get("QuickTips", ""),
+                        "SafetyAdvice": row.get("SafetyAdvice", ""),
+                    }
+                    count += 1
+
+            print(f"✅ تم تحميل {count} دواء من CSV")
+            return True
+
+        except Exception as e:
+            print(f"⚠️ خطأ في تحميل CSV: {e}")
+            return False
+    else:
+        print(f"⚠️ ملف CSV غير موجود: {CSV_PATH}")
+        print("📝 استخدام البيانات التجريبية")
+
+        # بيانات تجريبية كاملة بجميع الحقول
+        demo_data = {
+            "povimet cream": {
+                "Name": "Povimet Cream",
+                "Contains": "Povidone-Iodine 5%",
+                "ProductIntroduction": "مطهر ومضاد للبكتيريا يستخدم لعلاج الجروح والحروق",
+                "ProductBenefits": "يقتل البكتيريا والفطريات، يمنع العدوى",
+                "SideEffect": "قد يسبب تهيج بسيط للجلد",
+                "HowToUse": "يوضع على المنطقة المصابة 2-3 مرات يومياً",
+                "HowWorks": "يطلق اليود ببطء لقتل الكائنات الدقيقة",
+                "QuickTips": "تجنب ملامسة العينين، استشر الطبيب للحروق العميقة",
+                "SafetyAdvice": "لا تستخدمه للحروق العميقة أو الجروح الكبيرة",
+            },
+            "azel 40mg capsule": {
+                "Name": "Azel 40mg Capsule",
+                "Contains": "Azithromycin 40mg",
+                "ProductIntroduction": "مضاد حيوي لعلاج الالتهابات البكتيرية",
+                "ProductBenefits": "يعالج التهابات الجهاز التنفسي والجلد",
+                "SideEffect": "غثيان، إسهال، آلام في المعدة",
+                "HowToUse": "يؤخذ حسب إرشادات الطبيب، مرة واحدة يومياً",
+                "HowWorks": "يمنع تكاثر البكتيريا",
+                "QuickTips": "خذ الدواء مع الطعام إذا شعرت بغثيان",
+                "SafetyAdvice": "أكمل الجرعة كاملة حتى لو تحسنت الأعراض",
+            },
+            "long drive 30mg tablet": {
+                "Name": "Long Drive 30mg Tablet",
+                "Contains": "Long Drive 30mg",
+                "ProductIntroduction": "دواء لعلاج مشاكل المعدة",
+                "ProductBenefits": "يساعد في تحسين الهضم",
+                "SideEffect": "قد يسبب دوخة خفيفة",
+                "HowToUse": "يؤخذ قبل الأكل بنصف ساعة",
+                "HowWorks": "يعمل على تنظيم حركة المعدة",
+                "QuickTips": "لا تقم بقيادة السيارة إذا شعرت بدوخة",
+                "SafetyAdvice": "استشر الطبيب قبل الاستخدام",
+            },
+            "long drive 60mg tablet": {
+                "Name": "Long Drive 60mg Tablet",
+                "Contains": "Long Drive 60mg",
+                "ProductIntroduction": "دواء لعلاج مشاكل المعدة بجرعة أعلى",
+                "ProductBenefits": "يساعد في تحسين الهضم للحالات المتقدمة",
+                "SideEffect": "قد يسبب دوخة خفيفة",
+                "HowToUse": "يؤخذ حسب إرشادات الطبيب",
+                "HowWorks": "يعمل على تنظيم حركة المعدة",
+                "QuickTips": "لا تقم بقيادة السيارة إذا شعرت بدوخة",
+                "SafetyAdvice": "استشر الطبيب قبل الاستخدام",
+            },
+        }
+
+        for name in names:
+            name_lower = name.lower()
+            if name_lower in demo_data:
+                medicine_details[name_lower] = demo_data[name_lower]
+            else:
+                medicine_details[name_lower] = {
+                    "Name": name,
+                    "Contains": f"المكونات النشطة لـ {name}",
+                    "ProductIntroduction": f"هذا دواء {name} يستخدم لعلاج الحالات المختلفة",
+                    "ProductBenefits": "يستخدم وفقاً لإرشادات الطبيب",
+                    "SideEffect": "قد تحدث بعض الآثار الجانبية، استشر طبيبك",
+                    "HowToUse": "اتبع تعليمات الطبيب والصيدلي",
+                    "HowWorks": "يؤثر الدواء على الجسم وفقاً لآلية عمله",
+                    "QuickTips": "تناول الدواء بانتظام في المواعيد المحددة",
+                    "SafetyAdvice": "احفظ الدواء في مكان بارد وجاف بعيداً عن متناول الأطفال",
+                }
+
+        print(f"✅ تم تحميل {len(medicine_details)} دواء من البيانات التجريبية")
+        return False
+
+def extract_numbers_from_text(text: str) -> str:
+    """استخراج الأرقام من النص"""
+    numbers = re.findall(r'\d+', text)
+    return numbers[0] if numbers else ""
+
+def normalize_medicine_name(name: str) -> str:
+    """تطبيع اسم الدواء للبحث - الحفاظ على الأرقام"""
+    if not name:
+        return ""
+
+    name = name.lower().strip()
+    name = re.sub(r'O(?=\d)', '0', name)
+    name = re.sub(r'(?<=\d)O', '0', name)
+    name = name.replace('Omg', '40mg')
+    name = name.replace('omg', '40mg')
+    name = name.replace('Ome', '40me')
+    name = name.replace('ome', '40me')
+
+    return name
+
+def exact_match(name: str) -> dict:
+    """البحث عن تطابق تام"""
+    if not name:
+        return None
+
+    name_lower = name.lower().strip()
+
+    if name_lower in medicine_details:
+        details = medicine_details[name_lower].copy()
+        details["confidence"] = 100
+        details["match_type"] = "exact"
+        return details
+
+    name_without_dose = re.sub(r'\d+mg', '', name_lower).strip()
+    for med_name, details in medicine_details.items():
+        med_without_dose = re.sub(r'\d+mg', '', med_name).strip()
+        if name_without_dose == med_without_dose:
+            result = details.copy()
+            result["confidence"] = 95
+            result["match_type"] = "exact_ignore_dose"
+            return result
+
+    return None
+
+@lru_cache(maxsize=128)
+def get_medicine_names_list():
+    """إرجاع قائمة أسماء الأدوية للتخزين المؤقت"""
+    return tuple(names)  # tuple لتكون hashable للتخزين المؤقت
+
+def find_drug(name, threshold=0.65):
+    """البحث عن دواء - محسن للسرعة"""
+    if not name or len(name.strip()) < 2:
+        return None
+
+    name_clean = name.strip()
+    cache_key = f"find_{name_clean}_{threshold}"
+
+    if cache_key in search_cache:
+        return search_cache[cache_key]
+
+    # 1. تطابق تام
+    exact_result = exact_match(name_clean)
+    if exact_result:
+        search_cache[cache_key] = exact_result["Name"]
+        return exact_result["Name"]
+
+    # 2. تطبيع الاسم
+    name_normalized = normalize_medicine_name(name_clean)
+    name_without_numbers = re.sub(r'\d+', '', name_normalized).strip()
+
+    # 3. استخدام get_close_matches للبحث السريع
+    names_tuple = get_medicine_names_list()
+
+    # البحث بالاسم الطبيعي
+    matches = difflib.get_close_matches(name_without_numbers, names_tuple, n=1, cutoff=threshold)
+
+    if matches:
+        result = matches[0]
+        search_cache[cache_key] = result
+        return result
+
+    # 4. محاولة البحث مع تجاهل بعض الكلمات
+    search_cache[cache_key] = None
+    return None
+
+def find_drug_with_details(name):
+    """البحث عن دواء وإرجاع جميع التفاصيل - جميع الحقول"""
+    if not name:
+        return None
+
+    cache_key = f"details_{name}"
+    if cache_key in search_cache:
+        return search_cache[cache_key]
+
+    # 1. تطابق تام
+    exact_result = exact_match(name)
+    if exact_result:
+        exact_result["alternatives"] = get_alternatives(exact_result["Name"], exclude_name=exact_result["Name"])
+        search_cache[cache_key] = exact_result
+        return exact_result
+
+    # 2. بحث عادي
+    drug_name = find_drug(name)
+
+    if not drug_name:
+        search_cache[cache_key] = None
+        return None
+
+    details = medicine_details.get(drug_name.lower())
+    confidence = calculate_confidence(name, drug_name)
+
+    if details:
+        details_with_confidence = details.copy()
+        details_with_confidence["confidence"] = confidence
+        details_with_confidence["match_type"] = "fuzzy"
+        details_with_confidence["alternatives"] = get_alternatives(drug_name, exclude_name=drug_name)
+        search_cache[cache_key] = details_with_confidence
+        return details_with_confidence
+    else:
+        result = {
+            "Name": drug_name,
+            "Contains": "",
+            "ProductIntroduction": f"دواء {drug_name}",
+            "ProductBenefits": "",
+            "SideEffect": "",
+            "HowToUse": "",
+            "HowWorks": "",
+            "QuickTips": "",
+            "SafetyAdvice": "",
+            "confidence": confidence,
+            "match_type": "fuzzy",
+            "alternatives": get_alternatives(drug_name, exclude_name=drug_name)
+        }
+        search_cache[cache_key] = result
+        return result
+
+def calculate_confidence(input_name: str, matched_name: str) -> int:
+    """حساب نسبة الثقة"""
+    input_clean = input_name.strip().lower()
+    matched_clean = matched_name.strip().lower()
+
+    if input_clean == matched_clean:
+        return 100
+
+    input_dose = re.findall(r'\d+', input_clean)
+    matched_dose = re.findall(r'\d+', matched_clean)
+
+    input_without_dose = re.sub(r'\d+', '', input_clean)
+    matched_without_dose = re.sub(r'\d+', '', matched_clean)
+
+    if input_without_dose == matched_without_dose:
+        if input_dose and matched_dose and input_dose[0] == matched_dose[0]:
+            return 95
+        return 85
+
+    ratio = difflib.SequenceMatcher(None, input_without_dose, matched_without_dose).ratio()
+    return int(ratio * 100)
+
+def get_alternatives(drug_name, exclude_name=None, limit=5):
+    """الحصول على أدوية بديلة مشابهة"""
+    alternatives = []
+    drug_normalized = normalize_medicine_name(drug_name)
+    drug_without_numbers = re.sub(r'\d+', '', drug_normalized).strip()
+
+    for name in names:
+        if exclude_name and name.lower() == exclude_name.lower():
+            continue
+
+        name_normalized = normalize_medicine_name(name)
+        name_without_numbers = re.sub(r'\d+', '', name_normalized).strip()
+        score = difflib.SequenceMatcher(None, drug_without_numbers, name_without_numbers).ratio()
+
+        if score > 0.4:
+            alternatives.append({"name": name, "score": round(score * 100, 1)})
+
+    unique = []
+    seen = set()
+    for alt in alternatives:
+        if alt["name"] not in seen:
+            seen.add(alt["name"])
+            unique.append(alt)
+
+    unique.sort(key=lambda x: x["score"], reverse=True)
+    return unique[:limit]
+
+def get_all_medicine_names():
+    return names
+
+def search_medicine_by_name(name):
+    return find_drug_with_details(name)
+
+def clear_cache():
+    """مسح ذاكرة التخزين المؤقت"""
+    global search_cache
+    search_cache = {}
+    get_medicine_names_list.cache_clear()
+
+# تحميل قاعدة البيانات
+print("=" * 50)
+print("🚀 تحميل قاعدة بيانات الأدوية...")
+load_medicine_database()
+print(f"📋 عدد الأدوية في القائمة: {len(names)}")
+print("=" * 50)
+
+if __name__ == "__main__":
+    print("\n🧪 اختبار:")
+    test_cases = ["Povimet Cream", "Azel 40mg Capsule", "Long Drive 30mg Tablet"]
+    for test in test_cases:
+        result = find_drug_with_details(test)
+        if result:
+            print(f"\n🔍 {test} -> {result['Name']} (الثقة: {result.get('confidence', 0)}%)")
+            print(f"   🧪 المكونات: {result.get('Contains', '')[:50]}")
+            print(f"   📖 نبذة: {result.get('ProductIntroduction', '')[:50]}")
+            print(f"   💊 طريقة الاستخدام: {result.get('HowToUse', '')[:50]}")
+            print(f"   ⚠️ الآثار الجانبية: {result.get('SideEffect', '')[:50]}")
+
+
+#-----------------------------------------------------------------------------------------------
+#old drugs_SQL 
+# src/drugs.py
+import difflib
+import re
+import hashlib
+from pathlib import Path
+from functools import lru_cache
+import pyodbc
+from typing import Optional, Dict, List, Any
+
+# ==================== اتصال SQL Server ====================
+# إعدادات الاتصال بقاعدة البيانات - عدل هذه القيم حسب إعداداتك
+DB_CONFIG = {
+    'server': 'DESKTOP-4B3K5P2\SQLEXPRESS07',  # اسم السيرفر (عدله حسب إعداداتك)
+    'database': 'medicines_new',           # اسم قاعدة البيانات الجديدة
+    'driver': '{ODBC Driver 17 for SQL Server}'  # أو {SQL Server} للإصدارات القديمة
+}
+
+# بديل للاتصال باستخدام trusted_connection (Windows Authentication)
+DB_CONFIG_TRUSTED = {
+    'server': 'DESKTOP-4B3K5P2\SQLEXPRESS07',
+    'database': 'medicines_new',
+    'driver': '{ODBC Driver 17 for SQL Server}',
+    'trusted_connection': 'yes'
+}
+
+
+def get_db_connection():
+    """إنشاء اتصال بقاعدة بيانات SQL Server"""
+    try:
+        # جرب الاتصال الموثوق أولاً (Windows Authentication)
+        conn = pyodbc.connect(
+            f"DRIVER={DB_CONFIG_TRUSTED['driver']};"
+            f"SERVER={DB_CONFIG_TRUSTED['server']};"
+            f"DATABASE={DB_CONFIG_TRUSTED['database']};"
+            f"Trusted_Connection=yes;"
+            f"CHARSET=UTF8;"  # لدعم اللغة العربية
+        )
+        return conn
+    except pyodbc.Error as e:
+        print(f"⚠️ فشل الاتصال الموثوق: {e}")
+        try:
+            # جرب الاتصال العادي
+            conn = pyodbc.connect(
+                f"DRIVER={DB_CONFIG['driver']};"
+                f"SERVER={DB_CONFIG['server']};"
+                f"DATABASE={DB_CONFIG['database']};"
+                f"CHARSET=UTF8;"
+            )
+            return conn
+        except pyodbc.Error as e2:
+            print(f"❌ فشل الاتصال بقاعدة البيانات: {e2}")
+            return None
+li = '''
+A.E.R.
+A.S.
+A+D
+a05
+Zonticin Eye/Ear Drop
+Zenoxa OD 900 Tablet SR
+Zitelmi-H Tablet
+Zylin D 50/20 Capsule DR
+'''
+
+# ==================== تحميل البيانات من SQL Server ====================
+medicine_details = {}  # قاموس لتخزين تفاصيل الأدوية
+all_medicine_names = []  # قائمة بجميع أسماء الأدوية
+
+# ذاكرة تخزين مؤقت للبحث
+search_cache = {}
+
+
+def load_medicine_database_from_sql():
+    """تحميل قاعدة بيانات الأدوية من SQL Server - نسخة محسنة مع معالجة الأخطاء"""
+    global medicine_details, all_medicine_names
+
+    print("🔍 جاري الاتصال بقاعدة بيانات SQL Server...")
+
+    conn = get_db_connection()
+    if conn is None:
+        print("❌ فشل الاتصال بقاعدة البيانات. استخدام البيانات التجريبية.")
+        load_demo_data()
+        return False
+
+    try:
+        cursor = conn.cursor()
+
+        # الحصول على اسم الجدول أولاً
+        cursor.execute("""
+            SELECT TABLE_NAME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_TYPE = 'BASE TABLE'
+        """)
+        tables = cursor.fetchall()
+
+        if not tables:
+            print("❌ لا توجد جداول في قاعدة البيانات")
+            load_demo_data()
+            return False
+
+        table_name = tables[0][0]
+        print(f"📋 تم العثور على الجدول: {table_name}")
+
+        # الحصول على عدد الصفوف أولاً
+        cursor.execute(f"SELECT COUNT(*) FROM [{table_name}]")
+        row_count = cursor.fetchone()[0]
+        print(f"📊 عدد الصفوف في الجدول: {row_count}")
+
+        # قراءة أسماء الأعمدة
+        cursor.execute(f"SELECT TOP 1 * FROM [{table_name}]")
+        columns = [column[0] for column in cursor.description]
+        print(f"📊 الأعمدة الموجودة: {columns}")
+
+        # تعيين أسماء الأعمدة المتوقعة
+        column_mapping = {
+            'Name': None,
+            'Contains': None,
+            'ProductIntroduction': None,
+            'ProductBenefits': None,
+            'SideEffect': None,
+            'HowToUse': None,
+            'HowWorks': None,
+            'QuickTips': None,
+            'SafetyAdvice': None
+        }
+
+        for expected in column_mapping.keys():
+            for col in columns:
+                if col.lower() == expected.lower():
+                    column_mapping[expected] = col
+                    break
+
+        print(f"🔄 تطابق الأعمدة: {column_mapping}")
+
+        # قراءة البيانات باستخدام fetchmany (أسرع وأكثر أماناً للبيانات الكبيرة)
+        cursor.execute(f"SELECT * FROM [{table_name}]")
+
+        count = 0
+        error_count = 0
+        batch_size = 5000  # قراءة 5000 صف في كل مرة
+
+        print("⏳ جاري تحميل البيانات...")
+
+        while True:
+            rows = cursor.fetchmany(batch_size)
+            if not rows:
+                break
+
+            for row in rows:
+                try:
+                    # استخراج الاسم
+                    name_col = column_mapping['Name']
+                    if name_col is None:
+                        name_col = columns[0]
+
+                    name_idx = columns.index(name_col)
+                    name = str(row[name_idx]).strip() if row[name_idx] else ""
+
+                    if name and name.lower() != 'nan' and name != '':
+                        # دالة مساعدة لقراءة القيم بأمان
+                        def safe_get(col_name):
+                            if col_name and col_name in columns:
+                                idx = columns.index(col_name)
+                                val = row[idx]
+                                if val is None:
+                                    return ""
+                                # تحويل أي نوع بيانات لـ string
+                                if isinstance(val, (bytes, bytearray)):
+                                    return val.decode('utf-8', errors='ignore').strip()
+                                return str(val).strip()
+                            return ""
+
+                        medicine_details[name.lower()] = {
+                            "Name": name,
+                            "Contains": safe_get(column_mapping['Contains']),
+                            "ProductIntroduction": safe_get(column_mapping['ProductIntroduction']),
+                            "ProductBenefits": safe_get(column_mapping['ProductBenefits']),
+                            "SideEffect": safe_get(column_mapping['SideEffect']),
+                            "HowToUse": safe_get(column_mapping['HowToUse']),
+                            "HowWorks": safe_get(column_mapping['HowWorks']),
+                            "QuickTips": safe_get(column_mapping['QuickTips']),
+                            "SafetyAdvice": safe_get(column_mapping['SafetyAdvice']),
+                        }
+                        all_medicine_names.append(name)
+                        count += 1
+
+                        # عرض التقدم
+                        if count % 1000 == 0:
+                            print(f"   ✅ تم تحميل {count} دواء...")
+
+                except Exception as row_error:
+                    error_count += 1
+                    if error_count <= 3:  # اعرض أول 3 أخطاء فقط
+                        print(f"   ⚠️ خطأ في صف: {row_error}")
+                    continue
+
+            print(f"   📦 تمت معالجة دفعة حتى {count} صف...")
+
+        cursor.close()
+        conn.close()
+
+        print(f"\n{'='*50}")
+        print(f"✅ تم تحميل {count} دواء بنجاح من SQL Server")
+        if error_count > 0:
+            print(f"⚠️ تم تخطي {error_count} صف بسبب أخطاء")
+        print(f"📋 إجمالي الأسماء في القائمة: {len(all_medicine_names)}")
+        print(f"{'='*50}")
+
+        return True
+
+    except Exception as e:
+        print(f"❌ خطأ في تحميل البيانات: {e}")
+        import traceback
+        traceback.print_exc()
+        load_demo_data()
+        return False
+
+
+def get_column_value(row, columns, col_name, default=""):
+    """الحصول على قيمة عمود معين بأمان"""
+    if col_name and col_name in columns:
+        idx = columns.index(col_name)
+        val = row[idx]
+        return str(val).strip() if val else default
+    return default
+
+
+def load_demo_data():
+    """بيانات تجريبية في حال فشل الاتصال بقاعدة البيانات"""
+    global medicine_details, all_medicine_names
+
+    print("📝 استخدام البيانات التجريبية")
+
+    demo_medicines = [
+        {
+            "Name": "Povimet Cream",
+            "Contains": "Povidone-Iodine 5%",
+            "ProductIntroduction": "مطهر ومضاد للبكتيريا يستخدم لعلاج الجروح والحروق",
+            "ProductBenefits": "يقتل البكتيريا والفطريات، يمنع العدوى",
+            "SideEffect": "قد يسبب تهيج بسيط للجلد",
+            "HowToUse": "يوضع على المنطقة المصابة 2-3 مرات يومياً",
+            "HowWorks": "يطلق اليود ببطء لقتل الكائنات الدقيقة",
+            "QuickTips": "تجنب ملامسة العينين، استشر الطبيب للحروق العميقة",
+            "SafetyAdvice": "لا تستخدمه للحروق العميقة أو الجروح الكبيرة",
+        },
+        {
+            "Name": "Azel 40mg Capsule",
+            "Contains": "Azithromycin 40mg",
+            "ProductIntroduction": "مضاد حيوي لعلاج الالتهابات البكتيرية",
+            "ProductBenefits": "يعالج التهابات الجهاز التنفسي والجلد",
+            "SideEffect": "غثيان، إسهال، آلام في المعدة",
+            "HowToUse": "يؤخذ حسب إرشادات الطبيب، مرة واحدة يومياً",
+            "HowWorks": "يمنع تكاثر البكتيريا",
+            "QuickTips": "خذ الدواء مع الطعام إذا شعرت بغثيان",
+            "SafetyAdvice": "أكمل الجرعة كاملة حتى لو تحسنت الأعراض",
+        },
+        {
+            "Name": "Long Drive 30mg Tablet",
+            "Contains": "Long Drive 30mg",
+            "ProductIntroduction": "دواء لعلاج مشاكل المعدة",
+            "ProductBenefits": "يساعد في تحسين الهضم",
+            "SideEffect": "قد يسبب دوخة خفيفة",
+            "HowToUse": "يؤخذ قبل الأكل بنصف ساعة",
+            "HowWorks": "يعمل على تنظيم حركة المعدة",
+            "QuickTips": "لا تقم بقيادة السيارة إذا شعرت بدوخة",
+            "SafetyAdvice": "استشر الطبيب قبل الاستخدام",
+        },
+        {
+            "Name": "Long Drive 60mg Tablet",
+            "Contains": "Long Drive 60mg",
+            "ProductIntroduction": "دواء لعلاج مشاكل المعدة بجرعة أعلى",
+            "ProductBenefits": "يساعد في تحسين الهضم للحالات المتقدمة",
+            "SideEffect": "قد يسبب دوخة خفيفة",
+            "HowToUse": "يؤخذ حسب إرشادات الطبيب",
+            "HowWorks": "يعمل على تنظيم حركة المعدة",
+            "QuickTips": "لا تقم بقيادة السيارة إذا شعرت بدوخة",
+            "SafetyAdvice": "استشر الطبيب قبل الاستخدام",
+        },
+        {
+            "Name": "Amoxicillin 500mg Tablet",
+            "Contains": "Amoxicillin 500mg",
+            "ProductIntroduction": "مضاد حيوي واسع المدى",
+            "ProductBenefits": "يعالج التهابات بكتيرية متعددة",
+            "SideEffect": "حساسية، إسهال",
+            "HowToUse": "500mg كل 8 ساعات",
+            "HowWorks": "يقتل البكتيريا بواسطة تثبيط جدار الخلية",
+            "QuickTips": "خذه مع الماء",
+            "SafetyAdvice": "تجنبه إذا كنت حساساً للبنسلين",
+        },
+        {
+            "Name": "Paracetamol 500mg Tablet",
+            "Contains": "Paracetamol 500mg",
+            "ProductIntroduction": "مسكن ألم وخافض حرارة",
+            "ProductBenefits": "يخفف الآلام والحمى",
+            "SideEffect": "ندرة جداً، قد تحدث حساسية",
+            "HowToUse": "500mg كل 4-6 ساعات",
+            "HowWorks": "يثبط إنتاج البروستاجلاندين",
+            "QuickTips": "لا تتجاوز 4000mg يومياً",
+            "SafetyAdvice": "آمن للاستخدام",
+        },
+    ]
+
+    for med in demo_medicines:
+        name = med["Name"]
+        medicine_details[name.lower()] = med
+        all_medicine_names.append(name)
+
+    print(f"✅ تم تحميل {len(medicine_details)} دواء من البيانات التجريبية")
+
+
+# ==================== دوال البحث ====================
+
+def extract_numbers_from_text(text: str) -> str:
+    """استخراج الأرقام من النص"""
+    numbers = re.findall(r'\d+', text)
+    return numbers[0] if numbers else ""
+
+
+def normalize_medicine_name(name: str) -> str:
+    """تطبيع اسم الدواء للبحث - الحفاظ على الأرقام"""
+    if not name:
+        return ""
+
+    name = name.lower().strip()
+    name = re.sub(r'O(?=\d)', '0', name)
+    name = re.sub(r'(?<=\d)O', '0', name)
+    name = name.replace('Omg', '40mg')
+    name = name.replace('omg', '40mg')
+    name = name.replace('Ome', '40me')
+    name = name.replace('ome', '40me')
+
+    return name
+
+
+def exact_match(name: str) -> Optional[Dict]:
+    """البحث عن تطابق تام"""
+    if not name:
+        return None
+
+    name_lower = name.lower().strip()
+
+    if name_lower in medicine_details:
+        details = medicine_details[name_lower].copy()
+        details["confidence"] = 100
+        details["match_type"] = "exact"
+        return details
+
+    name_without_dose = re.sub(r'\d+mg', '', name_lower).strip()
+    for med_name, details in medicine_details.items():
+        med_without_dose = re.sub(r'\d+mg', '', med_name).strip()
+        if name_without_dose == med_without_dose:
+            result = details.copy()
+            result["confidence"] = 95
+            result["match_type"] = "exact_ignore_dose"
+            return result
+
+    return None
+
+
+@lru_cache(maxsize=128)
+def get_medicine_names_list():
+    """إرجاع قائمة أسماء الأدوية للتخزين المؤقت"""
+    return tuple(all_medicine_names)
+
+
+def find_drug(name, threshold=0.65):
+    """البحث عن دواء - محسن للسرعة"""
+    if not name or len(name.strip()) < 2:
+        return None
+
+    name_clean = name.strip()
+    cache_key = f"find_{name_clean}_{threshold}"
+
+    if cache_key in search_cache:
+        return search_cache[cache_key]
+
+    # 1. تطابق تام
+    exact_result = exact_match(name_clean)
+    if exact_result:
+        search_cache[cache_key] = exact_result["Name"]
+        return exact_result["Name"]
+
+    # 2. تطبيع الاسم
+    name_normalized = normalize_medicine_name(name_clean)
+    name_without_numbers = re.sub(r'\d+', '', name_normalized).strip()
+
+    # 3. استخدام get_close_matches للبحث السريع
+    names_tuple = get_medicine_names_list()
+
+    # البحث بالاسم الطبيعي
+    matches = difflib.get_close_matches(name_without_numbers, names_tuple, n=1, cutoff=threshold)
+
+    if matches:
+        result = matches[0]
+        search_cache[cache_key] = result
+        return result
+
+    # 4. محاولة البحث مع تجاهل بعض الكلمات
+    search_cache[cache_key] = None
+    return None
+
+
+def calculate_confidence(input_name: str, matched_name: str) -> int:
+    """حساب نسبة الثقة"""
+    input_clean = input_name.strip().lower()
+    matched_clean = matched_name.strip().lower()
+
+    if input_clean == matched_clean:
+        return 100
+
+    input_dose = re.findall(r'\d+', input_clean)
+    matched_dose = re.findall(r'\d+', matched_clean)
+
+    input_without_dose = re.sub(r'\d+', '', input_clean)
+    matched_without_dose = re.sub(r'\d+', '', matched_clean)
+
+    if input_without_dose == matched_without_dose:
+        if input_dose and matched_dose and input_dose[0] == matched_dose[0]:
+            return 95
+        return 85
+
+    ratio = difflib.SequenceMatcher(None, input_without_dose, matched_without_dose).ratio()
+    return int(ratio * 100)
+
+
+def get_alternatives(drug_name, exclude_name=None, limit=5):
+    """الحصول على أدوية بديلة مشابهة"""
+    alternatives = []
+    drug_normalized = normalize_medicine_name(drug_name)
+    drug_without_numbers = re.sub(r'\d+', '', drug_normalized).strip()
+
+    for name in all_medicine_names:
+        if exclude_name and name.lower() == exclude_name.lower():
+            continue
+
+        name_normalized = normalize_medicine_name(name)
+        name_without_numbers = re.sub(r'\d+', '', name_normalized).strip()
+        score = difflib.SequenceMatcher(None, drug_without_numbers, name_without_numbers).ratio()
+
+        if score > 0.4:
+            alternatives.append({"name": name, "score": round(score * 100, 1)})
+
+    unique = []
+    seen = set()
+    for alt in alternatives:
+        if alt["name"] not in seen:
+            seen.add(alt["name"])
+            unique.append(alt)
+
+    unique.sort(key=lambda x: x["score"], reverse=True)
+    return unique[:limit]
+
+
+def find_drug_with_details(name):
+    """البحث عن دواء وإرجاع جميع التفاصيل - جميع الحقول"""
+    if not name:
+        return None
+
+    cache_key = f"details_{name}"
+    if cache_key in search_cache:
+        return search_cache[cache_key]
+
+    # 1. تطابق تام
+    exact_result = exact_match(name)
+    if exact_result:
+        exact_result["alternatives"] = get_alternatives(exact_result["Name"], exclude_name=exact_result["Name"])
+        search_cache[cache_key] = exact_result
+        return exact_result
+
+    # 2. بحث عادي
+    drug_name = find_drug(name)
+
+    if not drug_name:
+        search_cache[cache_key] = None
+        return None
+
+    details = medicine_details.get(drug_name.lower())
+    confidence = calculate_confidence(name, drug_name)
+
+    if details:
+        details_with_confidence = details.copy()
+        details_with_confidence["confidence"] = confidence
+        details_with_confidence["match_type"] = "fuzzy"
+        details_with_confidence["alternatives"] = get_alternatives(drug_name, exclude_name=drug_name)
+        search_cache[cache_key] = details_with_confidence
+        return details_with_confidence
+    else:
+        result = {
+            "Name": drug_name,
+            "Contains": "",
+            "ProductIntroduction": f"دواء {drug_name}",
+            "ProductBenefits": "",
+            "SideEffect": "",
+            "HowToUse": "",
+            "HowWorks": "",
+            "QuickTips": "",
+            "SafetyAdvice": "",
+            "confidence": confidence,
+            "match_type": "fuzzy",
+            "alternatives": get_alternatives(drug_name, exclude_name=drug_name)
+        }
+        search_cache[cache_key] = result
+        return result
+
+
+def get_all_medicine_names():
+    return all_medicine_names
+
+
+def search_medicine_by_name(name):
+    return find_drug_with_details(name)
+
+
+def get_suggestions(partial_name: str, limit: int = 10) -> List[Dict]:
+    """الحصول على قائمة اقتراحات بناءً على نص جزئي - لـ autocomplete مثل Google"""
+    if not partial_name or len(partial_name.strip()) < 1:
+        return []
+
+    partial_clean = partial_name.strip().lower()
+    names_tuple = get_medicine_names_list()
+
+    # المطابقات التي تبدأ بنفس النص
+    prefix_matches = []
+    exact_prefix_matches = []
+
+    for name in names_tuple:
+        name_lower = name.lower()
+        if name_lower.startswith(partial_clean):
+            if name_lower == partial_clean:
+                exact_prefix_matches.append({"name": name, "type": "exact", "score": 100})
+            else:
+                prefix_matches.append({"name": name, "type": "prefix", "score": 95})
+
+    # البحث عن مطابقات مشابهة باستخدام difflib
+    fuzzy_matches = difflib.get_close_matches(partial_clean, [n.lower() for n in names_tuple], n=limit, cutoff=0.3)
+    fuzzy_results = []
+    for match in fuzzy_matches:
+        original_name = next((n for n in names_tuple if n.lower() == match), match)
+        if original_name:
+            fuzzy_results.append({"name": original_name, "type": "fuzzy", "score": 80})
+
+    # دمج النتائج مع إزالة التكرار
+    suggestions = []
+    seen = set()
+
+    # الأولوية: المطابقات التامة
+    for item in exact_prefix_matches:
+        if item["name"] not in seen:
+            suggestions.append(item)
+            seen.add(item["name"])
+
+    # ثم المطابقات البادئة
+    for item in prefix_matches:
+        if item["name"] not in seen:
+            suggestions.append(item)
+            seen.add(item["name"])
+
+    # ثم المطابقات المشابهة
+    for item in fuzzy_results:
+        if item["name"] not in seen:
+            suggestions.append(item)
+            seen.add(item["name"])
+
+    return suggestions[:limit]
+
+
+def clear_cache():
+    """مسح ذاكرة التخزين المؤقت"""
+    global search_cache
+    search_cache = {}
+    get_medicine_names_list.cache_clear()
+
+
+# ==================== تحميل البيانات عند بدء التشغيل ====================
+print("=" * 50)
+print("🚀 تحميل قاعدة بيانات الأدوية من SQL Server...")
+load_medicine_database_from_sql()
+print(f"📋 عدد الأدوية في القائمة: {len(all_medicine_names)}")
+print("=" * 50)
+
+
+# ==================== اختبار ====================
+if __name__ == "__main__":
+    print("\n🧪 اختبار البحث:")
+    test_cases = ["Povimet Cream", "Azel", "Long Drive", "Amoxicillin"]
+    for test in test_cases:
+        result = find_drug_with_details(test)
+        if result:
+            print(f"\n🔍 {test} -> {result['Name']} (الثقة: {result.get('confidence', 0)}%)")
+            print(f"   🧪 المكونات: {result.get('Contains', '')[:50]}")
+            print(f"   📖 نبذة: {result.get('ProductIntroduction', '')[:50]}")
+            print(f"   💊 طريقة الاستخدام: {result.get('HowToUse', '')[:50]}")
+
+    print("\n\n🧪 اختبار الاقتراحات (Autocomplete):")
+    suggestions = get_suggestions("azel", limit=5)
+    print(f"الاقتراحات لكلمة 'azel':")
+    for s in suggestions:
+        print(f"   - {s['name']} (نوع: {s['type']})")
+
+    suggestions = get_suggestions("long", limit=5)
+    print(f"\nالاقتراحات لكلمة 'long':")
+    for s in suggestions:
+        print(f"   - {s['name']} (نوع: {s['type']})")
+
+    suggestions = get_suggestions("amox", limit=5)
+    print(f"\nالاقتراحات لكلمة 'amox':")
+    for s in suggestions:
+        print(f"   - {s['name']} (نوع: {s['type']})")
+
+#--------------------------------------------------------------------------------------------
+#old medicine_app
+# src/medicine_app.py
+# from __future__ import annotations
+# import math
+# import os
+# import sys
+# import json
+# import logging
+# from pathlib import Path
+# from datetime import datetime
+# from flask import Flask, jsonify, render_template, request, send_file
+#
+# # إعداد logging
+# logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(message)s")
+# logger = logging.getLogger(__name__)
+#
+# # إضافة المسارات
+# ROOT = Path(__file__).resolve().parent
+# PARENT_DIR = ROOT.parent
+#
+# sys.path.insert(0, str(ROOT))
+# sys.path.insert(0, str(PARENT_DIR))
+#
+# # استيراد من pipeline
+# try:
+#     from pipeline import analyze_prescription_image, search_medicine_by_name, get_image_preview, \
+#         crop_image_with_coordinates
+#
+#     logger.info("✅ تم تحميل pipeline بنجاح")
+# except ImportError as e:
+#     logger.error(f"❌ خطأ في تحميل pipeline: {e}")
+#
+#
+#     def analyze_prescription_image(p, crop_coords=None):
+#         return {"medicines": [], "total_medicines_found": 0, "status": "error"}
+#
+#
+#     def search_medicine_by_name(n):
+#         return None
+#
+#
+#     def get_image_preview(p):
+#         return None
+#
+#
+#     def crop_image_with_coordinates(p, x, y, w, h):
+#         return None
+#
+# # إعداد Flask
+# app = Flask(__name__,
+#             template_folder=str(PARENT_DIR / "templates"),
+#             static_folder=str(PARENT_DIR / "static"))
+#
+# app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
+# app.config["SECRET_KEY"] = "prescription_analyzer_secret_key"
+#
+# ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+# UPLOAD_DIR = PARENT_DIR / "uploads"
+# UPLOAD_DIR.mkdir(exist_ok=True)
+# (PARENT_DIR / "temp").mkdir(exist_ok=True)
+#
+# # قاموس لتخزين وقت رفع الملفات لتنظيفها لاحقاً (اختياري)
+# uploaded_files = {}
+#
+#
+# def allowed_file(filename: str) -> bool:
+#     return Path(filename).suffix.lower() in ALLOWED_EXT
+#
+#
+# def json_safe(obj):
+#     if obj is None:
+#         return None
+#     if isinstance(obj, dict):
+#         return {k: json_safe(v) for k, v in obj.items()}
+#     if isinstance(obj, list):
+#         return [json_safe(v) for v in obj]
+#     if isinstance(obj, float):
+#         return None if (math.isnan(obj) or math.isinf(obj)) else round(obj, 2)
+#     return obj
+#
+#
+# @app.route("/")
+# def index():
+#     return render_template("index.html")
+#
+#
+# @app.route("/api/search")
+# def api_search():
+#     """البحث عن دواء بالاسم"""
+#     name = request.args.get("name", "").strip()
+#     if not name:
+#         return jsonify({"ok": False, "error": "الرجاء إدخال اسم الدواء"}), 400
+#
+#     logger.info(f"🔍 البحث عن: {name}")
+#
+#     match = search_medicine_by_name(name)
+#
+#     if not match:
+#         return jsonify({
+#             "ok": True,
+#             "medicine": None,
+#             "message": f"لم يتم العثور على دواء باسم '{name}'"
+#         }), 200
+#
+#     return jsonify({"ok": True, "medicine": json_safe(match)}), 200
+#
+#
+# @app.route("/api/upload", methods=["POST"])
+# def api_upload():
+#     """رفع الصورة والحصول على معاينة"""
+#     if "image" not in request.files:
+#         return jsonify({"ok": False, "error": "لم يتم إرسال الملف"}), 400
+#
+#     file = request.files["image"]
+#
+#     if not file or not file.filename:
+#         return jsonify({"ok": False, "error": "الملف فارغ"}), 400
+#
+#     if not allowed_file(file.filename):
+#         return jsonify({"ok": False, "error": "نوع الملف غير مدعوم"}), 400
+#
+#     # حفظ الملف
+#     ext = Path(file.filename).suffix.lower()
+#     safe_name = f"upload_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.urandom(4).hex()}{ext}"
+#     filepath = UPLOAD_DIR / safe_name
+#     file.save(str(filepath))
+#
+#     # تسجيل وقت الرفع
+#     uploaded_files[safe_name] = datetime.now()
+#
+#     # الحصول على معاينة
+#     preview = get_image_preview(str(filepath))
+#
+#     return jsonify({
+#         "ok": True,
+#         "filename": safe_name,
+#         "preview": preview,
+#         "original_size": Path(filepath).stat().st_size
+#     }), 200
+#
+#
+# @app.route("/api/prescription", methods=["POST"])
+# def api_prescription():
+#     """تحليل الصورة مع إمكانية تحديد منطقة القص"""
+#     data = request.get_json()
+#
+#     if not data or "filename" not in data:
+#         return jsonify({"ok": False, "error": "لم يتم إرسال اسم الملف"}), 400
+#
+#     filename = data["filename"]
+#     filepath = UPLOAD_DIR / filename
+#
+#     if not filepath.exists():
+#         return jsonify({"ok": False, "error": "الملف غير موجود. يرجى رفع الصورة مرة أخرى"}), 404
+#
+#     # الحصول على إحداثيات القص (اختياري)
+#     crop_coords = data.get("crop_coords")
+#
+#     try:
+#         result = analyze_prescription_image(str(filepath), crop_coords)
+#
+#         if "medicines" not in result:
+#             result["medicines"] = []
+#         if "total_medicines_found" not in result:
+#             result["total_medicines_found"] = len(result.get("medicines", []))
+#
+#         return jsonify({"ok": True, **json_safe(result)}), 200
+#
+#     except Exception as e:
+#         logger.exception(f"خطأ في التحليل: {e}")
+#         return jsonify({"ok": False, "error": str(e)}), 500
+#
+#     # ملاحظة: لم نعد نحذف الملف هنا! ليظل متاحاً للتحليل مرة أخرى
+#
+#
+# @app.route("/api/delete-file", methods=["POST"])
+# def api_delete_file():
+#     """حذف ملف مرفوع (اختياري - يمكن استدعاؤه عند مغادرة الصفحة)"""
+#     data = request.get_json()
+#     filename = data.get("filename")
+#
+#     if filename:
+#         filepath = UPLOAD_DIR / filename
+#         if filepath.exists():
+#             filepath.unlink()
+#             if filename in uploaded_files:
+#                 del uploaded_files[filename]
+#             return jsonify({"ok": True}), 200
+#
+#     return jsonify({"ok": False, "error": "الملف غير موجود"}), 404
+#
+#
+# @app.route("/api/health")
+# def api_health():
+#     return jsonify({"ok": True, "status": "running"}), 200
+#
+#
+# # تنظيف الملفات القديمة كل ساعة (اختياري - يحذف الملفات الأقدم من ساعة)
+# def cleanup_old_files():
+#     """حذف الملفات القديمة كل ساعة للحفاظ على مساحة التخزين"""
+#     now = datetime.now()
+#     for filename, upload_time in list(uploaded_files.items()):
+#         # حذف الملفات الأقدم من ساعة
+#         if (now - upload_time).seconds > 3600:
+#             filepath = UPLOAD_DIR / filename
+#             if filepath.exists():
+#                 filepath.unlink()
+#             del uploaded_files[filename]
+#             logger.info(f"🗑️ تم حذف الملف القديم: {filename}")
+#
+#
+# # تشغيل مهمة التنظيف كل ساعة
+# import threading
+#
+#
+# def schedule_cleanup():
+#     """جدولة تنظيف الملفات كل ساعة"""
+#
+#     def cleanup_job():
+#         while True:
+#             import time
+#             time.sleep(3600)  # كل ساعة
+#             cleanup_old_files()
+#
+#     thread = threading.Thread(target=cleanup_job, daemon=True)
+#     thread.start()
+#
+#
+# if __name__ == "__main__":
+#     print("\n" + "=" * 60)
+#     print("🚀 تشغيل تطبيق تحليل الروشتات الطبية")
+#     print("=" * 60)
+#     print(f"📍 http://localhost:5000")
+#     print(f"📁 مجلد التحميلات: {UPLOAD_DIR}")
+#     print(f"📁 مجلد المؤقت: {PARENT_DIR / 'temp'}")
+#     print("=" * 60)
+#     print("💡 ملاحظة: الملفات المرفوعة تبقى متاحة لمدة ساعة ثم تُحذف تلقائياً")
+#     print("=" * 60 + "\n")
+#
+#     # تشغيل مهمة التنظيف التلقائي
+#     schedule_cleanup()
+#
+#     app.run(host="0.0.0.0", port=5000, debug=False)
+
+
+#------------------------------------------------------------------------------------------------
+#old index.html
+<!--&lt;!&ndash; templates/index.html &ndash;&gt;-->
+<!--<!DOCTYPE html>-->
+<!--<html dir="rtl" lang="ar">-->
+<!--<head>-->
+<!--    <meta charset="UTF-8">-->
+<!--    <meta name="viewport" content="width=device-width, initial-scale=1.0">-->
+<!--    <title>نظام تحليل الوصفات الطبية</title>-->
+<!--    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">-->
+<!--    <link href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.12/cropper.min.css" rel="stylesheet">-->
+<!--    <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.12/cropper.min.js"></script>-->
+<!--    <style>-->
+<!--        * { margin: 0; padding: 0; box-sizing: border-box; }-->
+
+<!--        :root {-->
+<!--            &#45;&#45;primary-dark: #0d3b66;-->
+<!--            &#45;&#45;primary: #1a5f7a;-->
+<!--            &#45;&#45;primary-light: #2c8cac;-->
+<!--            &#45;&#45;accent: #f4a261;-->
+<!--            &#45;&#45;success: #2a9d8f;-->
+<!--            &#45;&#45;danger: #e76f51;-->
+<!--            &#45;&#45;white: #ffffff;-->
+<!--            &#45;&#45;text-dark: #2d3748;-->
+<!--            &#45;&#45;text-light: #718096;-->
+<!--            &#45;&#45;shadow: 0 10px 40px rgba(0, 0, 0, 0.1);-->
+<!--            &#45;&#45;shadow-sm: 0 4px 15px rgba(0, 0, 0, 0.08);-->
+<!--            &#45;&#45;radius: 16px;-->
+<!--            &#45;&#45;radius-sm: 12px;-->
+<!--        }-->
+
+<!--        body {-->
+<!--            font-family: 'Cairo', sans-serif;-->
+<!--            background: linear-gradient(135deg, #e8f0f5 0%, #d4e4ed 100%);-->
+<!--            min-height: 100vh;-->
+<!--            padding: 30px 20px;-->
+<!--        }-->
+
+<!--        .container { max-width: 1200px; margin: 0 auto; }-->
+
+<!--        /* Header */-->
+<!--        .header { text-align: center; margin-bottom: 35px; }-->
+<!--        .header-badge {-->
+<!--            display: inline-block;-->
+<!--            background: linear-gradient(135deg, var(&#45;&#45;primary-dark), var(&#45;&#45;primary));-->
+<!--            color: white;-->
+<!--            padding: 8px 24px;-->
+<!--            border-radius: 50px;-->
+<!--            font-size: 0.85rem;-->
+<!--            font-weight: 600;-->
+<!--            margin-bottom: 15px;-->
+<!--        }-->
+<!--        .header h1 {-->
+<!--            font-size: 2.2rem;-->
+<!--            font-weight: 800;-->
+<!--            background: linear-gradient(135deg, var(&#45;&#45;primary-dark), var(&#45;&#45;primary-light));-->
+<!--            -webkit-background-clip: text;-->
+<!--            -webkit-text-fill-color: transparent;-->
+<!--            margin-bottom: 8px;-->
+<!--        }-->
+<!--        .header p { color: var(&#45;&#45;text-light); font-size: 0.95rem; }-->
+
+<!--        /* Cards */-->
+<!--        .card {-->
+<!--            background: var(&#45;&#45;white);-->
+<!--            border-radius: var(&#45;&#45;radius);-->
+<!--            padding: 28px;-->
+<!--            margin-bottom: 25px;-->
+<!--            box-shadow: var(&#45;&#45;shadow);-->
+<!--        }-->
+<!--        .card-title {-->
+<!--            display: flex;-->
+<!--            align-items: center;-->
+<!--            gap: 12px;-->
+<!--            font-size: 1.2rem;-->
+<!--            font-weight: 700;-->
+<!--            color: var(&#45;&#45;primary-dark);-->
+<!--            margin-bottom: 22px;-->
+<!--        }-->
+<!--        .card-icon {-->
+<!--            width: 40px;-->
+<!--            height: 40px;-->
+<!--            background: linear-gradient(135deg, var(&#45;&#45;primary-dark), var(&#45;&#45;primary));-->
+<!--            border-radius: 12px;-->
+<!--            display: flex;-->
+<!--            align-items: center;-->
+<!--            justify-content: center;-->
+<!--            font-size: 1.2rem;-->
+<!--        }-->
+
+<!--        /* Search Section */-->
+<!--        .search-row {-->
+<!--            display: flex;-->
+<!--            gap: 15px;-->
+<!--            flex-wrap: wrap;-->
+<!--        }-->
+<!--        .search-input {-->
+<!--            flex: 1;-->
+<!--            padding: 14px 20px;-->
+<!--            border: 2px solid #e2e8f0;-->
+<!--            border-radius: var(&#45;&#45;radius-sm);-->
+<!--            font-size: 1rem;-->
+<!--            font-family: 'Cairo', sans-serif;-->
+<!--            min-width: 200px;-->
+<!--        }-->
+<!--        .search-input:focus {-->
+<!--            outline: none;-->
+<!--            border-color: var(&#45;&#45;primary);-->
+<!--        }-->
+
+<!--        /* Buttons */-->
+<!--        .btn {-->
+<!--            padding: 14px 32px;-->
+<!--            border: none;-->
+<!--            border-radius: var(&#45;&#45;radius-sm);-->
+<!--            font-family: 'Cairo', sans-serif;-->
+<!--            font-size: 1rem;-->
+<!--            font-weight: 700;-->
+<!--            cursor: pointer;-->
+<!--            transition: all 0.2s;-->
+<!--        }-->
+<!--        .btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15); }-->
+<!--        .btn-primary { background: linear-gradient(135deg, var(&#45;&#45;primary-dark), var(&#45;&#45;primary)); color: white; }-->
+<!--        .btn-accent { background: linear-gradient(135deg, var(&#45;&#45;primary), var(&#45;&#45;primary-light)); color: white; }-->
+<!--        .btn-success { background: linear-gradient(135deg, var(&#45;&#45;success), #3b9b8a); color: white; }-->
+<!--        .btn-outline { background: transparent; border: 2px solid var(&#45;&#45;primary); color: var(&#45;&#45;primary); }-->
+<!--        .btn-outline:hover { background: var(&#45;&#45;primary); color: white; }-->
+<!--        .btn-danger { background: linear-gradient(135deg, var(&#45;&#45;danger), #c55a3e); color: white; }-->
+<!--        .btn-full { width: 100%; margin-top: 20px; padding: 16px; font-size: 1.05rem; }-->
+
+<!--        /* Upload Zone */-->
+<!--        .upload-zone {-->
+<!--            border: 2px dashed #cbd5e0;-->
+<!--            border-radius: var(&#45;&#45;radius-sm);-->
+<!--            padding: 40px 20px;-->
+<!--            text-align: center;-->
+<!--            cursor: pointer;-->
+<!--            background: #f7fafc;-->
+<!--            transition: all 0.2s;-->
+<!--        }-->
+<!--        .upload-zone:hover, .upload-zone.dragover {-->
+<!--            background: #edf2f7;-->
+<!--            border-color: var(&#45;&#45;primary);-->
+<!--        }-->
+<!--        .upload-icon { font-size: 3.5rem; margin-bottom: 12px; }-->
+<!--        .file-info {-->
+<!--            margin-top: 15px;-->
+<!--            padding: 12px 16px;-->
+<!--            background: #e6fffa;-->
+<!--            border-radius: var(&#45;&#45;radius-sm);-->
+<!--            color: var(&#45;&#45;success);-->
+<!--            font-weight: 600;-->
+<!--            display: none;-->
+<!--        }-->
+
+<!--        /* Image Preview */-->
+<!--        .image-preview-container { margin-top: 20px; display: none; }-->
+<!--        .image-wrapper {-->
+<!--            background: #f7fafc;-->
+<!--            border-radius: var(&#45;&#45;radius-sm);-->
+<!--            padding: 15px;-->
+<!--            text-align: center;-->
+<!--        }-->
+<!--        #imageToCrop { max-width: 100%; max-height: 500px; display: block; margin: 0 auto; }-->
+<!--        .crop-controls {-->
+<!--            display: flex;-->
+<!--            gap: 10px;-->
+<!--            justify-content: center;-->
+<!--            margin-top: 15px;-->
+<!--            flex-wrap: wrap;-->
+<!--        }-->
+
+<!--        /* Loading */-->
+<!--        .loading-box {-->
+<!--            display: none;-->
+<!--            text-align: center;-->
+<!--            padding: 50px 20px;-->
+<!--            background: var(&#45;&#45;white);-->
+<!--            border-radius: var(&#45;&#45;radius);-->
+<!--            box-shadow: var(&#45;&#45;shadow);-->
+<!--            margin-bottom: 25px;-->
+<!--        }-->
+<!--        .spinner {-->
+<!--            width: 55px;-->
+<!--            height: 55px;-->
+<!--            border: 5px solid #e2e8f0;-->
+<!--            border-top-color: var(&#45;&#45;primary);-->
+<!--            border-radius: 50%;-->
+<!--            animation: spin 0.9s linear infinite;-->
+<!--            margin: 0 auto 18px;-->
+<!--        }-->
+<!--        @keyframes spin { to { transform: rotate(360deg); } }-->
+
+<!--        /* Stats */-->
+<!--        .stats-bar {-->
+<!--            display: none;-->
+<!--            background: var(&#45;&#45;white);-->
+<!--            border-radius: var(&#45;&#45;radius);-->
+<!--            padding: 20px 30px;-->
+<!--            margin-bottom: 25px;-->
+<!--            display: flex;-->
+<!--            justify-content: space-around;-->
+<!--            flex-wrap: wrap;-->
+<!--            gap: 20px;-->
+<!--        }-->
+<!--        .stat { text-align: center; }-->
+<!--        .stat-number { font-size: 2.2rem; font-weight: 800; color: var(&#45;&#45;primary); }-->
+<!--        .stat-label { font-size: 0.8rem; color: var(&#45;&#45;text-light); margin-top: 5px; }-->
+
+<!--        /* Medicine Cards - Enhanced */-->
+<!--        .med-card {-->
+<!--            background: var(&#45;&#45;white);-->
+<!--            border-radius: var(&#45;&#45;radius);-->
+<!--            overflow: hidden;-->
+<!--            box-shadow: var(&#45;&#45;shadow-sm);-->
+<!--            margin-bottom: 25px;-->
+<!--            transition: all 0.3s ease;-->
+<!--        }-->
+<!--        .med-card:hover { transform: translateY(-3px); box-shadow: var(&#45;&#45;shadow); }-->
+<!--        .med-header {-->
+<!--            background: linear-gradient(135deg, var(&#45;&#45;primary-dark), var(&#45;&#45;primary));-->
+<!--            padding: 20px 25px;-->
+<!--            display: flex;-->
+<!--            justify-content: space-between;-->
+<!--            align-items: center;-->
+<!--            flex-wrap: wrap;-->
+<!--            gap: 12px;-->
+<!--        }-->
+<!--        .med-name { font-size: 1.4rem; font-weight: 800; color: white; }-->
+<!--        .med-badge {-->
+<!--            display: inline-flex;-->
+<!--            align-items: center;-->
+<!--            gap: 6px;-->
+<!--            background: rgba(255, 255, 255, 0.2);-->
+<!--            color: white;-->
+<!--            padding: 6px 16px;-->
+<!--            border-radius: 30px;-->
+<!--            font-size: 0.85rem;-->
+<!--        }-->
+<!--        .med-body { padding: 24px; }-->
+
+<!--        /* Enhanced detail groups */-->
+<!--        .detail-group {-->
+<!--            margin-bottom: 20px;-->
+<!--            background: #f8fafc;-->
+<!--            border-radius: var(&#45;&#45;radius-sm);-->
+<!--            padding: 12px 16px;-->
+<!--            transition: all 0.2s;-->
+<!--            border-right: 3px solid transparent;-->
+<!--        }-->
+<!--        .detail-group:hover {-->
+<!--            background: #f1f5f9;-->
+<!--            border-right-color: var(&#45;&#45;primary);-->
+<!--        }-->
+<!--        .detail-label {-->
+<!--            display: flex;-->
+<!--            align-items: center;-->
+<!--            gap: 10px;-->
+<!--            font-weight: 700;-->
+<!--            color: var(&#45;&#45;primary-dark);-->
+<!--            margin-bottom: 10px;-->
+<!--            font-size: 1rem;-->
+<!--        }-->
+<!--        .detail-label .emoji {-->
+<!--            font-size: 1.2rem;-->
+<!--        }-->
+<!--        .detail-text {-->
+<!--            color: var(&#45;&#45;text-dark);-->
+<!--            line-height: 1.7;-->
+<!--            padding-right: 28px;-->
+<!--        }-->
+<!--        .divider { height: 1px; background: #e2e8f0; margin: 15px 0; }-->
+
+<!--        .conf-high { background: rgba(42, 157, 143, 0.2); color: #276749; }-->
+<!--        .conf-medium { background: rgba(244, 162, 97, 0.18); color: #9c4221; }-->
+<!--        .conf-low { background: rgba(231, 111, 81, 0.15); color: #9b2c2c; }-->
+
+<!--        .alt-box {-->
+<!--            background: #f7fafc;-->
+<!--            border-radius: var(&#45;&#45;radius-sm);-->
+<!--            padding: 16px 20px;-->
+<!--            margin-top: 20px;-->
+<!--            border: 1px solid #e2e8f0;-->
+<!--        }-->
+<!--        .alt-title {-->
+<!--            font-weight: 700;-->
+<!--            color: var(&#45;&#45;primary-dark);-->
+<!--            margin-bottom: 12px;-->
+<!--            display: flex;-->
+<!--            align-items: center;-->
+<!--            gap: 8px;-->
+<!--        }-->
+<!--        .alt-tag {-->
+<!--            display: inline-block;-->
+<!--            background: white;-->
+<!--            border: 1px solid #cbd5e0;-->
+<!--            color: var(&#45;&#45;primary);-->
+<!--            font-size: 0.8rem;-->
+<!--            padding: 5px 14px;-->
+<!--            border-radius: 30px;-->
+<!--            margin: 4px;-->
+<!--            transition: all 0.2s;-->
+<!--            cursor: pointer;-->
+<!--        }-->
+<!--        .alt-tag:hover {-->
+<!--            background: var(&#45;&#45;primary);-->
+<!--            color: white;-->
+<!--            transform: scale(1.05);-->
+<!--        }-->
+
+<!--        .empty-state {-->
+<!--            text-align: center;-->
+<!--            padding: 60px 20px;-->
+<!--            background: var(&#45;&#45;white);-->
+<!--            border-radius: var(&#45;&#45;radius);-->
+<!--        }-->
+<!--        .empty-state .big-icon { font-size: 4rem; margin-bottom: 20px; }-->
+<!--        .alert {-->
+<!--            padding: 15px 20px;-->
+<!--            border-radius: var(&#45;&#45;radius-sm);-->
+<!--            margin-bottom: 20px;-->
+<!--            display: none;-->
+<!--            position: fixed;-->
+<!--            top: 20px;-->
+<!--            left: 20px;-->
+<!--            right: 20px;-->
+<!--            z-index: 1000;-->
+<!--            max-width: 500px;-->
+<!--            margin: 0 auto 20px auto;-->
+<!--            box-shadow: var(&#45;&#45;shadow);-->
+<!--        }-->
+<!--        .alert-error { background: #fee2e2; color: var(&#45;&#45;danger); border-right: 4px solid var(&#45;&#45;danger); }-->
+<!--        .alert-success { background: #e6fffa; color: var(&#45;&#45;success); border-right: 4px solid var(&#45;&#45;success); }-->
+<!--        .alert-info { background: #e0f2fe; color: #0284c7; border-right: 4px solid #0284c7; }-->
+
+<!--        #resultsSection { display: none; }-->
+
+<!--        @media (max-width: 640px) {-->
+<!--            .card { padding: 20px; }-->
+<!--            .med-name { font-size: 1.2rem; }-->
+<!--            .detail-group { padding: 10px 12px; }-->
+<!--            .alert { margin: 10px; top: 10px; }-->
+<!--        }-->
+<!--    </style>-->
+<!--</head>-->
+<!--<body>-->
+<!--    <div class="container">-->
+<!--        <div class="header">-->
+<!--            <div class="header-badge">💊 نظام تحليل الوصفات الطبية المتقدم</div>-->
+<!--            <h1>📋 تحليل الروشتات الطبية</h1>-->
+<!--            <p>ابحث عن دواء مباشرة، أو ارفع صورة الروشتة لتحليلها واستخراج جميع الأدوية</p>-->
+<!--        </div>-->
+
+<!--        <div id="alert" class="alert"></div>-->
+
+<!--        &lt;!&ndash; Search Card &ndash;&gt;-->
+<!--        <div class="card">-->
+<!--            <div class="card-title">-->
+<!--                <div class="card-icon">🔍</div>-->
+<!--                البحث المباشر عن دواء-->
+<!--            </div>-->
+<!--            <div class="search-row">-->
+<!--                <input type="text" id="searchInput" class="search-input"-->
+<!--                       placeholder="اكتب اسم الدواء... مثل: Povimet Cream, Azel, Panadol"-->
+<!--                       onkeydown="if(event.key === 'Enter') searchMedicine()">-->
+<!--                <button class="btn btn-primary" onclick="searchMedicine()">بحث</button>-->
+<!--            </div>-->
+<!--        </div>-->
+
+<!--        &lt;!&ndash; Upload Card &ndash;&gt;-->
+<!--        <div class="card">-->
+<!--            <div class="card-title">-->
+<!--                <div class="card-icon">📷</div>-->
+<!--                رفع وتحليل روشتة طبية-->
+<!--            </div>-->
+
+<!--            <div class="upload-zone" id="uploadZone">-->
+<!--                <div class="upload-icon">📸</div>-->
+<!--                <p style="font-weight: 600; color: var(&#45;&#45;primary-dark);">انقر أو اسحب صورة الروشتة هنا</p>-->
+<!--                <p>الامتدادات المدعومة: JPG, PNG, BMP, WEBP</p>-->
+<!--                <input type="file" id="imageInput" accept="image/*" style="display: none;">-->
+<!--            </div>-->
+
+<!--            <div class="file-info" id="fileInfo"></div>-->
+
+<!--            <div class="image-preview-container" id="previewContainer">-->
+<!--                <h4>📐 حدد المنطقة التي تحتوي على الأدوية (اختياري):</h4>-->
+<!--                <div class="image-wrapper">-->
+<!--                    <img id="imageToCrop" src="" alt="معاينة الصورة">-->
+<!--                </div>-->
+<!--                <div class="crop-controls">-->
+<!--                    <button class="btn btn-outline" id="resetCropBtn">↺ إعادة تعيين</button>-->
+<!--                    <button class="btn btn-success" id="cropAndAnalyzeBtn">✂️ قص وتحليل</button>-->
+<!--                    <button class="btn btn-primary" id="analyzeFullBtn">📋 تحليل الصورة كاملة</button>-->
+<!--                </div>-->
+<!--            </div>-->
+<!--        </div>-->
+
+<!--        &lt;!&ndash; Loading &ndash;&gt;-->
+<!--        <div class="loading-box" id="loadingBox">-->
+<!--            <div class="spinner"></div>-->
+<!--            <p>جاري تحليل الروشتة...</p>-->
+<!--            <p class="sub">يتم استخراج النصوص والتعرف على الأدوية لكل سطر على حدة</p>-->
+<!--        </div>-->
+
+<!--        &lt;!&ndash; Results &ndash;&gt;-->
+<!--        <div id="resultsSection">-->
+<!--            <div class="stats-bar" id="statsBar"></div>-->
+<!--            <div id="resultsContainer"></div>-->
+<!--        </div>-->
+<!--    </div>-->
+
+<!--    <script>-->
+<!--        let selectedFile = null;-->
+<!--        let currentFilename = null;-->
+<!--        let cropper = null;-->
+
+<!--        const uploadZone = document.getElementById('uploadZone');-->
+<!--        const imageInput = document.getElementById('imageInput');-->
+<!--        const fileInfo = document.getElementById('fileInfo');-->
+<!--        const previewContainer = document.getElementById('previewContainer');-->
+<!--        const imageToCrop = document.getElementById('imageToCrop');-->
+<!--        const alertBox = document.getElementById('alert');-->
+
+<!--        function showAlert(message, type = 'error') {-->
+<!--            alertBox.className = `alert alert-${type}`;-->
+<!--            alertBox.innerHTML = message;-->
+<!--            alertBox.style.display = 'block';-->
+<!--            setTimeout(() => {-->
+<!--                alertBox.style.opacity = '0';-->
+<!--                setTimeout(() => {-->
+<!--                    alertBox.style.display = 'none';-->
+<!--                    alertBox.style.opacity = '1';-->
+<!--                }, 300);-->
+<!--            }, 4000);-->
+<!--        }-->
+
+<!--        // حذف الملف الحالي من السيرفر-->
+<!--        async function deleteCurrentFile() {-->
+<!--            if (currentFilename) {-->
+<!--                try {-->
+<!--                    const response = await fetch('/api/delete-file', {-->
+<!--                        method: 'POST',-->
+<!--                        headers: { 'Content-Type': 'application/json' },-->
+<!--                        body: JSON.stringify({ filename: currentFilename })-->
+<!--                    });-->
+<!--                    if (response.ok) {-->
+<!--                        console.log('✅ تم حذف الملف القديم:', currentFilename);-->
+<!--                    }-->
+<!--                } catch(e) {-->
+<!--                    console.log('خطأ في حذف الملف:', e);-->
+<!--                }-->
+<!--                currentFilename = null;-->
+<!--            }-->
+<!--        }-->
+
+<!--        uploadZone.addEventListener('click', () => imageInput.click());-->
+
+<!--        uploadZone.addEventListener('dragover', (e) => {-->
+<!--            e.preventDefault();-->
+<!--            uploadZone.classList.add('dragover');-->
+<!--        });-->
+
+<!--        uploadZone.addEventListener('dragleave', () => {-->
+<!--            uploadZone.classList.remove('dragover');-->
+<!--        });-->
+
+<!--        uploadZone.addEventListener('drop', async (e) => {-->
+<!--            e.preventDefault();-->
+<!--            uploadZone.classList.remove('dragover');-->
+<!--            const file = e.dataTransfer.files[0];-->
+<!--            if (file) await uploadFile(file);-->
+<!--        });-->
+
+<!--        imageInput.addEventListener('change', async (e) => {-->
+<!--            const file = e.target.files[0];-->
+<!--            if (file) await uploadFile(file);-->
+<!--        });-->
+
+<!--        async function uploadFile(file) {-->
+<!--            // حذف الملف القديم قبل رفع الجديد-->
+<!--            await deleteCurrentFile();-->
+
+<!--            selectedFile = file;-->
+<!--            fileInfo.style.display = 'block';-->
+<!--            fileInfo.textContent = `⏳ جاري رفع: ${file.name}...`;-->
+
+<!--            const formData = new FormData();-->
+<!--            formData.append('image', file);-->
+
+<!--            try {-->
+<!--                const response = await fetch('/api/upload', { method: 'POST', body: formData });-->
+<!--                const data = await response.json();-->
+
+<!--                if (data.ok) {-->
+<!--                    currentFilename = data.filename;-->
+<!--                    fileInfo.innerHTML = `✅ ${file.name} (${(file.size / 1024).toFixed(1)} KB) - تم الرفع بنجاح`;-->
+
+<!--                    imageToCrop.src = `data:image/png;base64,${data.preview}`;-->
+<!--                    previewContainer.style.display = 'block';-->
+
+<!--                    if (cropper) cropper.destroy();-->
+<!--                    cropper = new Cropper(imageToCrop, {-->
+<!--                        aspectRatio: NaN,-->
+<!--                        viewMode: 1,-->
+<!--                        dragMode: 'crop',-->
+<!--                        autoCropArea: 0.8,-->
+<!--                    });-->
+
+<!--                    showAlert('تم رفع الصورة بنجاح! يمكنك الآن تحديد المنطقة أو تحليل الصورة كاملة.', 'success');-->
+<!--                } else {-->
+<!--                    fileInfo.innerHTML = `❌ خطأ: ${data.error}`;-->
+<!--                    showAlert(data.error, 'error');-->
+<!--                }-->
+<!--            } catch (error) {-->
+<!--                fileInfo.innerHTML = `❌ خطأ في الرفع`;-->
+<!--                showAlert('حدث خطأ في رفع الصورة', 'error');-->
+<!--            }-->
+<!--        }-->
+
+<!--        document.getElementById('resetCropBtn').addEventListener('click', () => {-->
+<!--            if (cropper) { cropper.reset(); cropper.clear(); }-->
+<!--        });-->
+
+<!--        document.getElementById('cropAndAnalyzeBtn').addEventListener('click', async () => {-->
+<!--            if (!currentFilename) { showAlert('الرجاء رفع صورة أولاً', 'error'); return; }-->
+<!--            if (!cropper) { showAlert('لم يتم تهيئة أداة القص', 'error'); return; }-->
+
+<!--            const cropData = cropper.getData();-->
+<!--            const cropCoords = {-->
+<!--                x: Math.round(cropData.x),-->
+<!--                y: Math.round(cropData.y),-->
+<!--                width: Math.round(cropData.width),-->
+<!--                height: Math.round(cropData.height)-->
+<!--            };-->
+
+<!--            showLoading();-->
+<!--            hideResults();-->
+
+<!--            try {-->
+<!--                const response = await fetch('/api/prescription', {-->
+<!--                    method: 'POST',-->
+<!--                    headers: { 'Content-Type': 'application/json' },-->
+<!--                    body: JSON.stringify({ filename: currentFilename, crop_coords: cropCoords })-->
+<!--                });-->
+<!--                const data = await response.json();-->
+
+<!--                if (data.ok && data.medicines && data.medicines.length > 0) {-->
+<!--                    showStats(data);-->
+<!--                    renderMedicines(data.medicines);-->
+<!--                    showAlert(`✅ تم العثور على ${data.total_medicines_found} دواء`, 'success');-->
+<!--                } else {-->
+<!--                    renderEmpty(data.error || 'لم يتم العثور على أدوية في المنطقة المحددة');-->
+<!--                }-->
+<!--            } catch (error) {-->
+<!--                renderEmpty('حدث خطأ: ' + error.message);-->
+<!--            } finally { hideLoading(); }-->
+<!--        });-->
+
+<!--        document.getElementById('analyzeFullBtn').addEventListener('click', async () => {-->
+<!--            if (!currentFilename) { showAlert('الرجاء رفع صورة أولاً', 'error'); return; }-->
+
+<!--            showLoading();-->
+<!--            hideResults();-->
+
+<!--            try {-->
+<!--                const response = await fetch('/api/prescription', {-->
+<!--                    method: 'POST',-->
+<!--                    headers: { 'Content-Type': 'application/json' },-->
+<!--                    body: JSON.stringify({ filename: currentFilename })-->
+<!--                });-->
+<!--                const data = await response.json();-->
+
+<!--                if (data.ok && data.medicines && data.medicines.length > 0) {-->
+<!--                    showStats(data);-->
+<!--                    renderMedicines(data.medicines);-->
+<!--                    showAlert(`✅ تم العثور على ${data.total_medicines_found} دواء`, 'success');-->
+<!--                } else {-->
+<!--                    renderEmpty(data.error || 'لم يتم العثور على أدوية في الصورة');-->
+<!--                }-->
+<!--            } catch (error) {-->
+<!--                renderEmpty('حدث خطأ: ' + error.message);-->
+<!--            } finally { hideLoading(); }-->
+<!--        });-->
+
+<!--        async function searchMedicine() {-->
+<!--            const name = document.getElementById('searchInput').value.trim();-->
+<!--            if (!name) { showAlert('الرجاء إدخال اسم الدواء', 'error'); return; }-->
+
+<!--            showLoading();-->
+<!--            hideResults();-->
+
+<!--            try {-->
+<!--                const response = await fetch(`/api/search?name=${encodeURIComponent(name)}`);-->
+<!--                const data = await response.json();-->
+
+<!--                if (data.ok && data.medicine) {-->
+<!--                    showStats({ total_medicines_found: 1, total_lines_processed: '-', processing_time: '-' });-->
+<!--                    renderMedicines([data.medicine]);-->
+<!--                    showAlert(`✅ تم العثور على ${data.medicine.Name}`, 'success');-->
+<!--                } else {-->
+<!--                    renderEmpty(data.message || `لم يتم العثور على دواء باسم "${name}"`);-->
+<!--                }-->
+<!--            } catch (error) {-->
+<!--                renderEmpty('خطأ في البحث: ' + error.message);-->
+<!--            } finally { hideLoading(); }-->
+<!--        }-->
+
+<!--        function showLoading() {-->
+<!--            document.getElementById('loadingBox').style.display = 'block';-->
+<!--            hideResults();-->
+<!--        }-->
+<!--        function hideLoading() { document.getElementById('loadingBox').style.display = 'none'; }-->
+<!--        function hideResults() { document.getElementById('resultsSection').style.display = 'none'; }-->
+
+<!--        function showStats(data) {-->
+<!--            const statsBar = document.getElementById('statsBar');-->
+<!--            statsBar.style.display = 'flex';-->
+<!--            statsBar.innerHTML = `-->
+<!--                <div class="stat"><div class="stat-number">${data.total_medicines_found || 0}</div><div class="stat-label">💊 أدوية تم التعرف عليها</div></div>-->
+<!--                <div class="stat"><div class="stat-number">${data.total_lines_processed || '-'}</div><div class="stat-label">📝 أسطر تم تحليلها</div></div>-->
+<!--                <div class="stat"><div class="stat-number">${data.processing_time || '-'}</div><div class="stat-label">⏱️ ثواني المعالجة</div></div>-->
+<!--            `;-->
+<!--        }-->
+
+<!--        function renderMedicines(medicines) {-->
+<!--            let html = '';-->
+<!--            medicines.forEach(med => {-->
+<!--                const confidence = med.confidence || 85;-->
+<!--                let confClass = confidence >= 85 ? 'conf-high' : (confidence >= 65 ? 'conf-medium' : 'conf-low');-->
+
+<!--                html += `-->
+<!--                    <div class="med-card">-->
+<!--                        <div class="med-header">-->
+<!--                            <div class="med-name">💊 ${escapeHtml(med.Name) || 'غير معروف'}</div>-->
+<!--                            <div class="med-badge ${confClass}">🎯 دقة التطابق: ${confidence}%</div>-->
+<!--                        </div>-->
+<!--                        <div class="med-body">-->
+<!--                            ${renderDetailGroup('🧪', 'المكونات الفعالة', med.Contains)}-->
+<!--                            ${renderDetailGroup('📖', 'نبذة عن الدواء', med.ProductIntroduction)}-->
+<!--                            ${renderDetailGroup('💪', 'الفوائد', med.ProductBenefits)}-->
+<!--                            ${renderDetailGroup('⚠️', 'الآثار الجانبية', med.SideEffect)}-->
+<!--                            ${renderDetailGroup('💊', 'طريقة الاستخدام', med.HowToUse)}-->
+<!--                            ${renderDetailGroup('🔬', 'آلية العمل', med.HowWorks)}-->
+<!--                            ${renderDetailGroup('💡', 'نصائح سريعة', med.QuickTips)}-->
+<!--                            ${renderDetailGroup('🛡️', 'نصائح الأمان', med.SafetyAdvice)}-->
+<!--                            ${renderAlternatives(med.alternatives)}-->
+<!--                        </div>-->
+<!--                    </div>-->
+<!--                `;-->
+<!--            });-->
+<!--            document.getElementById('resultsContainer').innerHTML = html;-->
+<!--            document.getElementById('resultsSection').style.display = 'block';-->
+<!--            document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth' });-->
+<!--        }-->
+
+<!--        function renderDetailGroup(emoji, label, value) {-->
+<!--            if (!value || value.trim() === '') return '';-->
+<!--            return `-->
+<!--                <div class="detail-group">-->
+<!--                    <div class="detail-label">-->
+<!--                        <span class="emoji">${emoji}</span>-->
+<!--                        <span>${label}:</span>-->
+<!--                    </div>-->
+<!--                    <div class="detail-text">${escapeHtml(value)}</div>-->
+<!--                </div>-->
+<!--            `;-->
+<!--        }-->
+
+<!--        function renderAlternatives(alternatives) {-->
+<!--            if (!alternatives || alternatives.length === 0) return '';-->
+
+<!--            let altHtml = `-->
+<!--                <div class="alt-box">-->
+<!--                    <div class="alt-title">-->
+<!--                        <span>🔄</span>-->
+<!--                        <span>أدوية بديلة:</span>-->
+<!--                    </div>-->
+<!--                    <div class="alt-list">-->
+<!--            `;-->
+
+<!--            alternatives.forEach(alt => {-->
+<!--                altHtml += `<span class="alt-tag" onclick="searchAlternative('${escapeHtml(alt.name)}')">💊 ${escapeHtml(alt.name)} (${alt.score}%)</span>`;-->
+<!--            });-->
+
+<!--            altHtml += `</div></div>`;-->
+<!--            return altHtml;-->
+<!--        }-->
+
+<!--        function searchAlternative(name) {-->
+<!--            document.getElementById('searchInput').value = name;-->
+<!--            searchMedicine();-->
+<!--        }-->
+
+<!--        function escapeHtml(text) {-->
+<!--            if (!text) return '';-->
+<!--            const div = document.createElement('div');-->
+<!--            div.textContent = text;-->
+<!--            return div.innerHTML;-->
+<!--        }-->
+
+<!--        function renderEmpty(message) {-->
+<!--            document.getElementById('statsBar').style.display = 'none';-->
+<!--            document.getElementById('resultsContainer').innerHTML = `-->
+<!--                <div class="empty-state">-->
+<!--                    <div class="big-icon">🔍</div>-->
+<!--                    <h3>${escapeHtml(message)}</h3>-->
+<!--                    <p>تأكد من أن الصورة واضحة وتحتوي على أسماء أدوية</p>-->
+<!--                </div>-->
+<!--            `;-->
+<!--            document.getElementById('resultsSection').style.display = 'block';-->
+<!--        }-->
+
+<!--        // حذف الملف عند إغلاق الصفحة أو تحديثها-->
+<!--        window.addEventListener('beforeunload', async () => {-->
+<!--            if (currentFilename) {-->
+<!--                try {-->
+<!--                    await fetch('/api/delete-file', {-->
+<!--                        method: 'POST',-->
+<!--                        headers: { 'Content-Type': 'application/json' },-->
+<!--                        body: JSON.stringify({ filename: currentFilename }),-->
+<!--                        keepalive: true-->
+<!--                    });-->
+<!--                } catch(e) {}-->
+<!--            }-->
+<!--        });-->
+<!--    </script>-->
+<!--</body>-->
+<!--</html>-->
+
